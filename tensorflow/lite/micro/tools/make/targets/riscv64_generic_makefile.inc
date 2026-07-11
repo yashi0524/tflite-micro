@@ -1,9 +1,9 @@
-# Settings for RISCV 32-bit toolchain.
-TARGET_ARCH := riscv32
+# Settings for RISCV 64-bit toolchain.
+TARGET_ARCH := riscv64
 TARGET_TOOLCHAIN_PREFIX := riscv64-unknown-elf-
 
-RISCV_ARCH := rv32imc
-RISCV_ABI := ilp32
+RISCV_ARCH := rv64imc
+RISCV_ABI := lp64
 RISCV_CODE_MODEL := medany
 
 # Allow additional flags on the command line for debugging.
@@ -56,12 +56,12 @@ LDFLAGS += -mno-relax
 # (default, via QEMU linux-user mode) or "gem5" (via gem5 syscall-emulation
 # mode — see tensorflow/lite/micro/testing/test_with_gem5.sh). Override on
 # the command line, e.g.:
-#   make ... TARGET=riscv32_generic SIMULATOR=gem5 test_hello_world_test
+#   make ... TARGET=riscv64_generic SIMULATOR=gem5 test_hello_world_test
 SIMULATOR ?= qemu
 ifeq ($(SIMULATOR),gem5)
-  TEST_SCRIPT := $(TENSORFLOW_ROOT)tensorflow/lite/micro/testing/test_with_gem5.sh riscv32 minor
+  TEST_SCRIPT := $(TENSORFLOW_ROOT)tensorflow/lite/micro/testing/test_with_gem5.sh riscv64 minor
 else
-  TEST_SCRIPT := $(TENSORFLOW_ROOT)tensorflow/lite/micro/testing/test_with_qemu.sh riscv32 rv32
+  TEST_SCRIPT := $(TENSORFLOW_ROOT)tensorflow/lite/micro/testing/test_with_qemu.sh riscv64 rv64
 endif
 SIZE_SCRIPT := ${TENSORFLOW_ROOT}tensorflow/lite/micro/testing/size_riscv32_binary.sh
 
