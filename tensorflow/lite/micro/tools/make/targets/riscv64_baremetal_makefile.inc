@@ -7,10 +7,14 @@
 # with _write/_exit implemented via semihosting SYS_WRITE0/SYS_EXIT instead
 # of Linux syscalls.
 #
-# There is intentionally no SIMULATOR switch here (unlike riscv{32,64}_generic):
-# QEMU linux-user mode cannot run this binary at all (it's not a Linux
-# process — no ELF interpreter, no syscalls to emulate), so gem5 FS mode
-# (test_with_gem5_fs.sh) is the only supported way to run it.
+# SIMULATOR selects how TEST_SCRIPT runs a built binary: "gem5" (default,
+# cycle-accurate MinorCPU FS mode via test_with_gem5_fs.sh) or "whisper" (a
+# fast functional-only RISC-V ISS, no timing model, via
+# test_with_whisper.sh — same binary, same --semihosting I/O, just a
+# different simulator underneath). QEMU linux-user mode is NOT an option
+# here (unlike riscv{32,64}_generic): it cannot run this binary at all —
+# it's not a Linux process, no ELF interpreter, no syscalls to emulate.
+#   make ... TARGET=riscv64_baremetal SIMULATOR=whisper test_hello_world_test
 #
 # Usage:
 #   make -f tensorflow/lite/micro/tools/make/Makefile \
@@ -92,7 +96,12 @@ CXXFLAGS += $(RISCV_EXTRA_CFLAGS)
 # TODO(b/279805615): Check whether this is fixed in newer versions of the toolchain.
 LDFLAGS += -mno-relax
 
-TEST_SCRIPT := $(TENSORFLOW_ROOT)tensorflow/lite/micro/testing/test_with_gem5_fs.sh riscv64 minor
+SIMULATOR ?= gem5
+ifeq ($(SIMULATOR),whisper)
+  TEST_SCRIPT := $(TENSORFLOW_ROOT)tensorflow/lite/micro/testing/test_with_whisper.sh riscv64 minor
+else
+  TEST_SCRIPT := $(TENSORFLOW_ROOT)tensorflow/lite/micro/testing/test_with_gem5_fs.sh riscv64 minor
+endif
 SIZE_SCRIPT := ${TENSORFLOW_ROOT}tensorflow/lite/micro/testing/size_riscv32_binary.sh
 
 include $(MAKEFILE_DIR)/ext_libs/eyalroz_printf.inc
