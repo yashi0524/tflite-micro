@@ -52,14 +52,24 @@ CXXFLAGS += $(RISCV_EXTRA_CFLAGS)
 # TODO(b/279805615): Check whether this is fixed in newer versions of the toolchain.
 LDFLAGS += -mno-relax
 
-# SIMULATOR selects how TEST_SCRIPT runs a built test binary: "qemu"
-# (default, via QEMU linux-user mode) or "gem5" (via gem5 syscall-emulation
-# mode — see tensorflow/lite/micro/testing/test_with_gem5.sh). Override on
-# the command line, e.g.:
-#   make ... TARGET=riscv64_generic SIMULATOR=gem5 test_hello_world_test
+# SIMULATOR selects how TEST_SCRIPT runs a built test binary: "qemu" (the
+# only supported choice — via QEMU linux-user mode). Override on the
+# command line if ever needed, e.g.:
+#   make ... TARGET=riscv64_generic SIMULATOR=qemu test_hello_world_test
+#
+# SIMULATOR=gem5 (gem5 SE/syscall-emulation mode, via
+# tensorflow/lite/micro/testing/test_with_gem5.sh) is intentionally
+# disabled here: riscv64_baremetal + SIMULATOR=whisper now covers the
+# fast-functional-simulator role gem5 SE mode was filling, and gem5 FS
+# mode (riscv64_baremetal's default) covers the cycle-accurate role — so
+# gem5 SE mode on this target is redundant. test_with_gem5.sh and
+# sim_config/gem5_riscv_se.py are left in place (not deleted) in case
+# this is ever revisited.
 SIMULATOR ?= qemu
 ifeq ($(SIMULATOR),gem5)
-  TEST_SCRIPT := $(TENSORFLOW_ROOT)tensorflow/lite/micro/testing/test_with_gem5.sh riscv64 minor
+  $(error SIMULATOR=gem5 (SE mode) is disabled for $(TARGET) — use \
+    TARGET=riscv64_baremetal with SIMULATOR=whisper (fast, functional) or \
+    the default SIMULATOR=gem5 there (cycle-accurate FS mode) instead)
 else
   TEST_SCRIPT := $(TENSORFLOW_ROOT)tensorflow/lite/micro/testing/test_with_qemu.sh riscv64 rv64
 endif
