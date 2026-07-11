@@ -57,7 +57,41 @@ _start:
     addi    t0, t0, 8                                                                                             
     addi    t1, t1, 8                                         
     bltu    t1, t2, .Ldata_loop
-  .Ldata_done:                   
+  .Ldata_done:
+
+    /* Run C++ global/static constructors (.preinit_array + .init_array)
+     * before main(). linker_semi.ld already defines
+     * __{preinit,init}_array_{start,end} (needed for KEEP()'d ordering
+     * regardless), but nothing was ever walking them — harmless for
+     * binaries with no such constructors, but silently wrong for any
+     * that register themselves this way. Concretely: TFLM's
+     * testing/micro_test_v2.h TEST(...) macro (GTest-style, as opposed
+     * to the older TF_LITE_MICRO_TEST macro) registers each test via a
+     * `static TestRegistrar reg(...);` at namespace scope — a static
+     * object with a non-trivial constructor. Without running
+     * .init_array, that registration never happens: the test binary
+     * still runs to completion and exits 0, but silently executes zero
+     * tests ("[==========] 0 tests ran." / "~~~ALL TESTS PASSED~~~" —
+     * a vacuous, not a real, pass). */
+    la      s0, __preinit_array_start
+    la      s1, __preinit_array_end
+    j       .Lpreinit_check
+  .Lpreinit_loop:
+    ld      t0, 0(s0)
+    jalr    t0
+    addi    s0, s0, 8
+  .Lpreinit_check:
+    bltu    s0, s1, .Lpreinit_loop
+
+    la      s0, __init_array_start
+    la      s1, __init_array_end
+    j       .Linit_check
+  .Linit_loop:
+    ld      t0, 0(s0)
+    jalr    t0
+    addi    s0, s0, 8
+  .Linit_check:
+    bltu    s0, s1, .Linit_loop
 
     li      a0, 0
     li      a1, 0
