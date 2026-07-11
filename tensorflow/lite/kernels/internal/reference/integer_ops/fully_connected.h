@@ -18,11 +18,54 @@ limitations under the License.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <type_traits>
 
 #include "tensorflow/lite/kernels/internal/common.h"
 
+#if defined(__riscv_vector)
+#include <riscv_vector.h>
+#endif  // defined(__riscv_vector)
+
 namespace tflite {
 namespace reference_integer_ops {
+
+#if defined(__riscv_vector)
+// RVV-vectorized replacement for the innermost `for (d) acc += (filter_val +
+// filter_offset) * (input_val + input_offset)` reduction in the int8
+// FullyConnected() below. Mathematically identical to the scalar loop, term
+// by term -- integer addition/multiplication is exactly associative, so
+// widening both operands to int16 (folding in filter_offset/input_offset via
+// a single widening-add-with-scalar each) before an int16*int16->int32
+// widening multiply and int32 reduction introduces no precision loss and no
+// reordering-sensitive rounding, unlike a float accumulation would. Overflow
+// is not a concern for realistic FC shapes: operands after widening are
+// bounded by roughly +/-256 (int8 range plus a typically-small offset), so
+// products are bounded by roughly 65536 and even a K=100000 reduction would
+// stay comfortably inside int32.
+inline int32_t Int8DotProductRvv(const int8_t* input, const int8_t* filter,
+                                 int accum_depth, int32_t input_offset,
+                                 int32_t filter_offset) {
+  int32_t acc = 0;
+  int n = accum_depth;
+  const int8_t* a = input;
+  const int8_t* w = filter;
+  while (n > 0) {
+    size_t vl = __riscv_vsetvl_e8m1(n);
+    vint8m1_t va = __riscv_vle8_v_i8m1(a, vl);
+    vint8m1_t vw = __riscv_vle8_v_i8m1(w, vl);
+    vint16m2_t va16 = __riscv_vwadd_vx_i16m2(va, input_offset, vl);
+    vint16m2_t vw16 = __riscv_vwadd_vx_i16m2(vw, filter_offset, vl);
+    vint32m4_t prod32 = __riscv_vwmul_vv_i32m4(vw16, va16, vl);
+    vint32m1_t zero32 = __riscv_vmv_v_x_i32m1(0, 1);
+    vint32m1_t sum_v = __riscv_vredsum_vs_i32m4_i32m1(prod32, zero32, vl);
+    acc += __riscv_vmv_x_s_i32m1_i32(sum_v);
+    a += vl;
+    w += vl;
+    n -= static_cast<int>(vl);
+  }
+  return acc;
+}
+#endif  // defined(__riscv_vector)
 
 // For per-channel functions, since it is defined in quantization spec that
 // weights are symmetric
@@ -160,11 +203,32 @@ void FullyConnected(const FullyConnectedParams& params,
   for (int b = 0; b < batches; ++b) {
     for (int out_c = 0; out_c < output_depth; ++out_c) {
       BiasType acc = 0;
+#if defined(__riscv_vector)
+      // Only the int8-in/int8-filter/int32-bias instantiation matches the
+      // RVV helper's assumptions (see Int8DotProductRvv's comment) -- other
+      // instantiations of this template (e.g. int16 activations) fall
+      // through to the portable scalar loop below unchanged.
+      if constexpr (std::is_same<InputType, int8_t>::value &&
+                    std::is_same<WeightType, int8_t>::value &&
+                    std::is_same<BiasType, int32_t>::value &&
+                    std::is_same<OutputType, int8_t>::value) {
+        acc = Int8DotProductRvv(input_data + b * accum_depth,
+                                filter_data + out_c * accum_depth,
+                                accum_depth, input_offset, filter_offset);
+      } else {
+        for (int d = 0; d < accum_depth; ++d) {
+          int32_t input_val = input_data[b * accum_depth + d];
+          int32_t filter_val = filter_data[out_c * accum_depth + d];
+          acc += (filter_val + filter_offset) * (input_val + input_offset);
+        }
+      }
+#else   // !defined(__riscv_vector)
       for (int d = 0; d < accum_depth; ++d) {
         int32_t input_val = input_data[b * accum_depth + d];
         int32_t filter_val = filter_data[out_c * accum_depth + d];
         acc += (filter_val + filter_offset) * (input_val + input_offset);
       }
+#endif  // defined(__riscv_vector)
       if (bias_data) {
         acc += bias_data[out_c];
       }
