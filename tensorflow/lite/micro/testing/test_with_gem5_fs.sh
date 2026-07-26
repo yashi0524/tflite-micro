@@ -47,9 +47,9 @@ TFLM_ROOT_DIR=${SCRIPT_DIR}/../../../../
 GEM5_BIN="${GEM5_BIN:-gem5.opt}"
 GEM5_FS_CONFIG="${GEM5_FS_CONFIG:-${TFLM_ROOT_DIR}../sim_config/gem5_riscv_baremetal_fs.py}"
 
-TEST_TMPDIR=/tmp/test_${5}
-MICRO_LOG_PATH=${TEST_TMPDIR}/${3}
-MICRO_LOG_FILENAME=${MICRO_LOG_PATH}/logs.txt
+OUTPUT_DIR="${TFLM_ROOT_DIR}../test/output"
+MICRO_LOG_PATH=${OUTPUT_DIR}/${3}
+MICRO_LOG_FILENAME=${MICRO_LOG_PATH}/logs_gem5.txt
 M5OUT_DIR=${MICRO_LOG_PATH}/m5out
 
 mkdir -p ${MICRO_LOG_PATH}

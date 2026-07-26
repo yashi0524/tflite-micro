@@ -47,9 +47,9 @@ TFLM_ROOT_DIR=${SCRIPT_DIR}/../../../../
 WHISPER_BIN="${WHISPER_BIN:-whisper}"
 WHISPER_CONFIG="${WHISPER_CONFIG:-${TFLM_ROOT_DIR}../sim_config/whisper_rv64gcv_config.json}"
 
-TEST_TMPDIR=/tmp/test_${5}
-MICRO_LOG_PATH=${TEST_TMPDIR}/${3}
-MICRO_LOG_FILENAME=${MICRO_LOG_PATH}/logs.txt
+OUTPUT_DIR="${TFLM_ROOT_DIR}../test/output"
+MICRO_LOG_PATH=${OUTPUT_DIR}/${3}
+MICRO_LOG_FILENAME=${MICRO_LOG_PATH}/logs_whisper.txt
 
 mkdir -p ${MICRO_LOG_PATH}
 
