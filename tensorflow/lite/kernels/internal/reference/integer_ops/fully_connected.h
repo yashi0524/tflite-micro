@@ -32,20 +32,39 @@ namespace reference_integer_ops {
 #if defined(__riscv_vector)
 // RVV-vectorized replacement for the innermost `for (d) acc += (filter_val +
 // filter_offset) * (input_val + input_offset)` reduction in the int8
-// FullyConnected() below. Mathematically identical to the scalar loop, term
-// by term -- integer addition/multiplication is exactly associative, so
-// widening both operands to int16 (folding in filter_offset/input_offset via
-// a single widening-add-with-scalar each) before an int16*int16->int32
-// widening multiply and int32 reduction introduces no precision loss and no
-// reordering-sensitive rounding, unlike a float accumulation would. Overflow
-// is not a concern for realistic FC shapes: operands after widening are
-// bounded by roughly +/-256 (int8 range plus a typically-small offset), so
-// products are bounded by roughly 65536 and even a K=100000 reduction would
-// stay comfortably inside int32.
+// FullyConnected() below.
+//
+// Uses the standard gemmlowp-style algebraic expansion instead of folding
+// filter_offset/input_offset directly into a widening vwadd.vx:
+//   Sigma_d (filter[d]+filter_offset)*(input[d]+input_offset) =
+//     Sigma(filter*input) + input_offset*Sigma(filter) +
+//     filter_offset*Sigma(input) + accum_depth*filter_offset*input_offset
+// filter_offset/input_offset are only ever applied via plain int32_t scalar
+// arithmetic *after* the vector reduction -- never passed as a vector
+// intrinsic's scalar operand. This matters because that operand is
+// SEW(=8)-wide for a widening op sourced from int8: an offset of exactly
+// 128 (a legal value -- e.g. zero_point=-128 gives input_offset=128, and
+// int8's range is -128..127) silently truncates to -128 when passed to
+// vwadd.vx, corrupting the result. Confirmed via a standalone probe: the
+// previous (int8_t input_offset/filter_offset folded into vwadd.vx)
+// implementation produced wrong output on ~1/3 of (accum_depth,
+// offset) combinations tested whenever an offset was exactly +/-128;
+// this expansion passed all of them. Both widens below use offset=0 (pure
+// sign-extend), which can never overflow int8_t regardless of what
+// input_offset/filter_offset actually are.
+//
+// Requires GCC >= 13.4 (xPack riscv-none-elf-gcc): this exact intrinsic
+// sequence miscompiles at -O1/-O2 under GCC 13.2.0 -- whisper traps with
+// an illegal instruction, gem5 runs to completion but produces wrong
+// output. Verified fixed under 13.4.0 (this project's toolchain as of
+// this fix) via a standalone probe (114/114 correct at -O2, matching the
+// -O0 result) before applying here.
 inline int32_t Int8DotProductRvv(const int8_t* input, const int8_t* filter,
                                  int accum_depth, int32_t input_offset,
                                  int32_t filter_offset) {
-  int32_t acc = 0;
+  int32_t dot = 0;
+  int32_t filter_sum = 0;
+  int32_t input_sum = 0;
   int n = accum_depth;
   const int8_t* a = input;
   const int8_t* w = filter;
@@ -53,17 +72,26 @@ inline int32_t Int8DotProductRvv(const int8_t* input, const int8_t* filter,
     size_t vl = __riscv_vsetvl_e8m1(n);
     vint8m1_t va = __riscv_vle8_v_i8m1(a, vl);
     vint8m1_t vw = __riscv_vle8_v_i8m1(w, vl);
-    vint16m2_t va16 = __riscv_vwadd_vx_i16m2(va, input_offset, vl);
-    vint16m2_t vw16 = __riscv_vwadd_vx_i16m2(vw, filter_offset, vl);
+    vint16m2_t va16 = __riscv_vwadd_vx_i16m2(va, 0, vl);
+    vint16m2_t vw16 = __riscv_vwadd_vx_i16m2(vw, 0, vl);
     vint32m4_t prod32 = __riscv_vwmul_vv_i32m4(vw16, va16, vl);
     vint32m1_t zero32 = __riscv_vmv_v_x_i32m1(0, 1);
-    vint32m1_t sum_v = __riscv_vredsum_vs_i32m4_i32m1(prod32, zero32, vl);
-    acc += __riscv_vmv_x_s_i32m1_i32(sum_v);
+
+    vint32m1_t dot_v = __riscv_vredsum_vs_i32m4_i32m1(prod32, zero32, vl);
+    dot += __riscv_vmv_x_s_i32m1_i32(dot_v);
+
+    vint32m1_t fsum_v = __riscv_vwredsum_vs_i16m2_i32m1(vw16, zero32, vl);
+    filter_sum += __riscv_vmv_x_s_i32m1_i32(fsum_v);
+
+    vint32m1_t isum_v = __riscv_vwredsum_vs_i16m2_i32m1(va16, zero32, vl);
+    input_sum += __riscv_vmv_x_s_i32m1_i32(isum_v);
+
     a += vl;
     w += vl;
     n -= static_cast<int>(vl);
   }
-  return acc;
+  return dot + input_offset * filter_sum + filter_offset * input_sum +
+         accum_depth * filter_offset * input_offset;
 }
 #endif  // defined(__riscv_vector)
 
@@ -206,12 +234,17 @@ void FullyConnected(const FullyConnectedParams& params,
 #if defined(__riscv_vector)
       // Only the int8-in/int8-filter/int32-bias instantiation matches the
       // RVV helper's assumptions (see Int8DotProductRvv's comment) -- other
-      // instantiations of this template (e.g. int16 activations) fall
-      // through to the portable scalar loop below unchanged.
+      // instantiations of this template fall through to the portable scalar
+      // loop below unchanged. OutputType is deliberately not part of this
+      // check: Int8DotProductRvv only ever produces the int32 accumulation,
+      // identical to the scalar loop -- OutputType only affects the
+      // requantize/clamp/cast below, which is unchanged either way. This
+      // lets UNIDIRECTIONAL_SEQUENCE_LSTM's int16-output gate matmuls
+      // (lstm_eval.cc's FullyConnected() call, same int8/int8/int32
+      // in/filter/bias types as FC) take this path too.
       if constexpr (std::is_same<InputType, int8_t>::value &&
                     std::is_same<WeightType, int8_t>::value &&
-                    std::is_same<BiasType, int32_t>::value &&
-                    std::is_same<OutputType, int8_t>::value) {
+                    std::is_same<BiasType, int32_t>::value) {
         acc = Int8DotProductRvv(input_data + b * accum_depth,
                                 filter_data + out_c * accum_depth,
                                 accum_depth, input_offset, filter_offset);
