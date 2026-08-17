@@ -59,6 +59,21 @@ namespace reference_integer_ops {
 // output. Verified fixed under 13.4.0 (this project's toolchain as of
 // this fix) via a standalone probe (114/114 correct at -O2, matching the
 // -O0 result) before applying here.
+//
+// Base LMUL=2 (e8m2 -> e16m4 -> e32m8): the widest feasible given this
+// double-widening chain -- a third widening step (base m4) would need
+// m16 for the second widen, which doesn't exist (RVV's max LMUL is 8).
+// Measured on gem5 (cycle-accurate) across every FC/LSTM-gate accum_depth
+// exercised by this project's models: 25-34% fewer cycles than base
+// LMUL=1 for accum_depth >= 128 (dtln's FC/LSTM shapes: 128, 257;
+// micro_speech's FC: 4000), ~4% *more* cycles for accum_depth <= 28
+// (mnist_lstm's LSTM gates: 20, 28; hello_world's FC: 16) -- those already
+// complete in a single vector op at LMUL=1 (VLEN=512 gives VLMAX=64 for
+// e8), so LMUL=2 only adds fixed per-instruction overhead there with no
+// iteration-count reduction to offset it. Net win for this project's
+// standing benchmark (dtln, all shapes >=128); small regression accepted
+// on the other models' already-cheap small-K gates rather than adding a
+// runtime branch to the hot path.
 inline int32_t Int8DotProductRvv(const int8_t* input, const int8_t* filter,
                                  int accum_depth, int32_t input_offset,
                                  int32_t filter_offset) {
@@ -69,21 +84,21 @@ inline int32_t Int8DotProductRvv(const int8_t* input, const int8_t* filter,
   const int8_t* a = input;
   const int8_t* w = filter;
   while (n > 0) {
-    size_t vl = __riscv_vsetvl_e8m1(n);
-    vint8m1_t va = __riscv_vle8_v_i8m1(a, vl);
-    vint8m1_t vw = __riscv_vle8_v_i8m1(w, vl);
-    vint16m2_t va16 = __riscv_vwadd_vx_i16m2(va, 0, vl);
-    vint16m2_t vw16 = __riscv_vwadd_vx_i16m2(vw, 0, vl);
-    vint32m4_t prod32 = __riscv_vwmul_vv_i32m4(vw16, va16, vl);
+    size_t vl = __riscv_vsetvl_e8m2(n);
+    vint8m2_t va = __riscv_vle8_v_i8m2(a, vl);
+    vint8m2_t vw = __riscv_vle8_v_i8m2(w, vl);
+    vint16m4_t va16 = __riscv_vwadd_vx_i16m4(va, 0, vl);
+    vint16m4_t vw16 = __riscv_vwadd_vx_i16m4(vw, 0, vl);
+    vint32m8_t prod32 = __riscv_vwmul_vv_i32m8(vw16, va16, vl);
     vint32m1_t zero32 = __riscv_vmv_v_x_i32m1(0, 1);
 
-    vint32m1_t dot_v = __riscv_vredsum_vs_i32m4_i32m1(prod32, zero32, vl);
+    vint32m1_t dot_v = __riscv_vredsum_vs_i32m8_i32m1(prod32, zero32, vl);
     dot += __riscv_vmv_x_s_i32m1_i32(dot_v);
 
-    vint32m1_t fsum_v = __riscv_vwredsum_vs_i16m2_i32m1(vw16, zero32, vl);
+    vint32m1_t fsum_v = __riscv_vwredsum_vs_i16m4_i32m1(vw16, zero32, vl);
     filter_sum += __riscv_vmv_x_s_i32m1_i32(fsum_v);
 
-    vint32m1_t isum_v = __riscv_vwredsum_vs_i16m2_i32m1(va16, zero32, vl);
+    vint32m1_t isum_v = __riscv_vwredsum_vs_i16m4_i32m1(va16, zero32, vl);
     input_sum += __riscv_vmv_x_s_i32m1_i32(isum_v);
 
     a += vl;
