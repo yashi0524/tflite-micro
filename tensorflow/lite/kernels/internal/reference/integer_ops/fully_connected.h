@@ -110,6 +110,38 @@ inline int32_t Int8DotProductRvv(const int8_t* input, const int8_t* filter,
 }
 #endif  // defined(__riscv_vector)
 
+// Force-inlined copy of tensorflow/lite/kernels/internal/common.cc's
+// int32_t MultiplyByQuantizedMultiplier(int32_t, int32_t, int) overload,
+// used in place of the shared one only on FullyConnected()'s hot loop
+// below. The shared version is declared TFLITE_NOINLINE (deliberate
+// upstream code-size discipline -- it's called from many kernels across
+// the codebase, inlining it everywhere would bloat every call site) and
+// was confirmed via disassembly to compile to a genuine out-of-line
+// `jalr` call on this specific hot path (`R_RISCV_CALL_PLT
+// _ZN6tflite29MultiplyByQuantizedMultiplierEiii`), executed once per
+// output channel -- 257 times for dtln's FC alone, plus every LSTM gate
+// matmul.
+//
+// Applied, not just tried: measured a 29.34% whole-model cycle reduction
+// (FULLY_CONNECTED alone: 84,311 -> 54,858 cycles, -34.93%) on gem5,
+// bigger than every other optimization in this project combined (LMUL
+// widening: 25-34% on the vector portion alone; 2 FUs: 4-6%;
+// interleaving: mixed, -3% to +10%) -- see "Realistic FULLY_CONNECTED
+// bottleneck decomposition" in ../../../../../../../doc/
+// gem5_integration.md for the full writeup and cross-shape correctness
+// validation. Algorithm is byte-for-byte unchanged from the shared
+// version -- this is purely a call-overhead fix, not a numerical one,
+// and output CRC32s matched exactly across all 4 validated models both
+// before and after.
+inline int32_t MultiplyByQuantizedMultiplierInlined(
+    int32_t x, int32_t quantized_multiplier, int shift) {
+  const int64_t total_shift = 31 - shift;
+  const int64_t round = static_cast<int64_t>(1) << (total_shift - 1);
+  int64_t result = x * static_cast<int64_t>(quantized_multiplier) + round;
+  result = result >> total_shift;
+  return static_cast<int32_t>(result);
+}
+
 // For per-channel functions, since it is defined in quantization spec that
 // weights are symmetric
 // (https://www.tensorflow.org/lite/performance/quantization_spec#symmetric_vs_asymmetric),
@@ -280,8 +312,8 @@ void FullyConnected(const FullyConnectedParams& params,
       if (bias_data) {
         acc += bias_data[out_c];
       }
-      int32_t acc_scaled =
-          MultiplyByQuantizedMultiplier(acc, output_multiplier, output_shift);
+      int32_t acc_scaled = MultiplyByQuantizedMultiplierInlined(
+          acc, output_multiplier, output_shift);
       acc_scaled += output_offset;
       acc_scaled = std::max(acc_scaled, output_activation_min);
       acc_scaled = std::min(acc_scaled, output_activation_max);
