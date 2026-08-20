@@ -148,9 +148,31 @@ inline int32_t Int8DotProductRvv(const int8_t* input, const int8_t* filter,
 // it without needing to. Every "vectorized speedup vs. scalar baseline"
 // number in doc/performance_dtln.md depends on the scalar baseline
 // staying exactly as it was -- this scoping is why it still does.
-// Algorithm is byte-for-byte unchanged from the shared version -- this is
-// purely a call-overhead fix, not a numerical one, and output CRC32s
-// matched exactly across all 4 validated models both before and after.
+//
+// CORRECTNESS FIX (2026-08-20): this used to hardcode the single-rounding
+// algorithm unconditionally, contradicting the "byte-for-byte unchanged
+// from the shared version" claim above -- common.cc's shared
+// MultiplyByQuantizedMultiplier is gated by `#if TFLITE_SINGLE_ROUNDING`
+// between two genuinely different algorithms (single-rounding, shift-based
+// vs. double-rounding, gemmlowp::SaturatingRoundingDoublingHighMul +
+// RoundingDivideByPOT), and this project's build never defines
+// TFLITE_SINGLE_ROUNDING, so the real scalar path has always used
+// double-rounding while this inlined copy silently used single-rounding.
+// Confirmed via a standalone probe (2_pattern/tflm/patterns/microbenchmark/
+// requant_correctness_probe.c) that the two disagree by exactly +/-1 on a
+// data-dependent 0.1%-12.1% of values -- root-caused a real vectorized-
+// output CRC32 mismatch on anomaly_detection_int8.tflite (MLPerf Tiny
+// ad01); see doc/anomaly_detection/performance_anomaly_detection.md's
+// "Correctness" section and doc/gem5_integration.md's "Known limitations"
+// for the full writeup. Fixed by mirroring common.cc's own `#if`/`#else`
+// exactly (calling the real gemmlowp functions directly, not a
+// reimplementation, since common.h -- already included above -- pulls in
+// fixedpoint.h regardless) instead of hardcoding one branch. dtln's own
+// numbers (54,858 cycles, 29.34% win) predate this fix and were measured
+// under the previously-wrong single-rounding branch; re-verify after this
+// change since the double-rounding path has one extra conditional
+// (left_shift/right_shift split) that single-rounding didn't.
+#if TFLITE_SINGLE_ROUNDING
 inline int32_t MultiplyByQuantizedMultiplierInlined(
     int32_t x, int32_t quantized_multiplier, int shift) {
   const int64_t total_shift = 31 - shift;
@@ -159,6 +181,19 @@ inline int32_t MultiplyByQuantizedMultiplierInlined(
   result = result >> total_shift;
   return static_cast<int32_t>(result);
 }
+#else   // !TFLITE_SINGLE_ROUNDING (the default, and what this project's
+        // build actually uses)
+inline int32_t MultiplyByQuantizedMultiplierInlined(
+    int32_t x, int32_t quantized_multiplier, int shift) {
+  using gemmlowp::RoundingDivideByPOT;
+  using gemmlowp::SaturatingRoundingDoublingHighMul;
+  int left_shift = shift > 0 ? shift : 0;
+  int right_shift = shift > 0 ? 0 : -shift;
+  return RoundingDivideByPOT(SaturatingRoundingDoublingHighMul(
+                                 x * (1 << left_shift), quantized_multiplier),
+                             right_shift);
+}
+#endif  // TFLITE_SINGLE_ROUNDING
 #endif  // defined(__riscv_vector)
 
 // For per-channel functions, since it is defined in quantization spec that
